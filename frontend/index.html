@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Daily CLI Updater</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- スリムヘッダー -->
+    <header class="app-header">
+      <div class="brand-group">
+        <img src="/assets/icon-64.png" alt="Daily CLI Updater" class="brand-icon-img">
+        <h1 class="brand-title">Daily CLI Updater</h1>
+        <div id="connectionBadge" class="connection-badge is-connecting" title="サーバー接続状態">
+          <span class="status-dot"></span>
+          <span id="connectionText">接続中</span>
+        </div>
+        <span id="shellInfoTag" class="meta-mono" title="使用シェル">pwsh</span>
+      </div>
+
+      <div class="header-actions">
+        <label class="inline-select-wrap" for="quickWorkersSelect" title="最大並列実行数">
+          <span class="inline-label">並列</span>
+          <select id="quickWorkersSelect" class="select-minimal">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4" selected>4</option>
+            <option value="6">6</option>
+            <option value="8">8</option>
+          </select>
+        </label>
+        <button id="themeToggleBtn" type="button" class="btn btn-ghost btn-sm" title="テーマ切替">
+          テーマ
+        </button>
+        <button id="openSettingsBtn" type="button" class="btn btn-ghost btn-sm">
+          設定
+        </button>
+        <button id="openAddModalBtn" type="button" class="btn btn-secondary btn-sm">
+          + 登録
+        </button>
+      </div>
+    </header>
+
+    <!-- 統合コマンドバー -->
+    <section class="toolbar" aria-label="アップデート操作と絞り込み">
+      <div class="toolbar-left">
+        <button id="runAllBtn" type="button" class="btn btn-primary">
+          すべて一括更新 <span id="enabledCountBadge" class="count-tag">0</span>
+        </button>
+        <button id="runSelectedBtn" type="button" class="btn btn-secondary" disabled>
+          選択更新 <span id="selectedCountBadge" class="count-tag">0</span>
+        </button>
+        <button id="retryFailedBtn" type="button" class="btn btn-secondary is-hidden">
+          失敗のみ再実行 <span id="failedCountBadge" class="count-tag count-danger">0</span>
+        </button>
+        <button id="cancelAllBtn" type="button" class="btn btn-danger-subtle is-hidden">
+          中止
+        </button>
+      </div>
+
+      <div class="toolbar-right">
+        <input
+          id="searchInput"
+          type="search"
+          class="input-minimal search-input"
+          placeholder="絞り込み..."
+          autocomplete="off"
+        >
+        <select id="categoryFilter" class="select-minimal" aria-label="カテゴリ絞り込み">
+          <option value="all">すべて</option>
+        </select>
+        <div class="toolbar-divider" aria-hidden="true"></div>
+        <button id="selectAllBtn" type="button" class="btn btn-text btn-xs">全選択</button>
+        <button id="clearSelectionBtn" type="button" class="btn btn-text btn-xs">解除</button>
+      </div>
+    </section>
+
+    <!-- 極細進捗ストリップ -->
+    <section id="progressSection" class="progress-strip is-hidden" aria-live="polite">
+      <div class="progress-meta">
+        <div class="progress-left">
+          <span id="progressHeadline" class="progress-headline">実行中</span>
+          <span id="progressRatio" class="meta-mono">0 / 0</span>
+        </div>
+        <div class="progress-counters">
+          <span>実行 <strong id="statRunning">0</strong></span>
+          <span>待機 <strong id="statQueued">0</strong></span>
+          <span class="text-ok">成功 <strong id="statSuccess">0</strong></span>
+          <span class="text-err">失敗 <strong id="statFailed">0</strong></span>
+        </div>
+      </div>
+      <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressBarTrack">
+        <div id="progressBarFill" class="progress-fill"></div>
+      </div>
+    </section>
+
+    <!-- メインワークスペース（ミニマルリスト＋ライブログ） -->
+    <main class="workspace-grid">
+      <section class="panel apps-panel" aria-label="登録済みアプリ一覧">
+        <div class="panel-header">
+          <span class="panel-title">登録アプリ</span>
+          <span class="panel-hint">スイッチで一括対象を切替</span>
+        </div>
+        <div id="appsContainer" class="apps-list"></div>
+        <div id="emptyState" class="empty-state is-hidden">
+          <p class="empty-title">表示できるアプリがありません</p>
+          <p class="empty-desc">右上の「+ 登録」からアップデートコマンドを追加してください。</p>
+        </div>
+      </section>
+
+      <aside class="panel console-panel" aria-label="実行ログ">
+        <div class="panel-header">
+          <div class="console-title-wrap">
+            <span class="panel-title">出力ログ</span>
+            <span id="consoleScopeBadge" class="scope-tag">全体</span>
+          </div>
+          <div class="console-actions">
+            <button id="showAllLogsBtn" type="button" class="btn btn-text btn-xs">全体</button>
+            <label class="check-inline" for="autoScrollCheckbox">
+              <input id="autoScrollCheckbox" type="checkbox" checked>
+              <span>追従</span>
+            </label>
+            <button id="copyLogsBtn" type="button" class="btn btn-text btn-xs">コピー</button>
+            <button id="clearLogsBtn" type="button" class="btn btn-text btn-xs">クリア</button>
+          </div>
+        </div>
+        <div id="consoleOutput" class="console-output" role="log" aria-live="off"></div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- アプリ登録 / 編集モーダル -->
+  <div id="appModal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="appModalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="appModalTitle" class="modal-title">アプリを新規登録</h2>
+        <button id="closeAppModalBtn" type="button" class="icon-btn" aria-label="閉じる">✕</button>
+      </div>
+      <form id="appForm" class="modal-body">
+        <input id="appIdField" type="hidden">
+
+        <div class="form-field">
+          <span class="field-label">テンプレート</span>
+          <div id="templateButtons" class="template-chips"></div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-field">
+            <label class="field-label" for="appNameInput">アプリ名 <span class="required">*</span></label>
+            <input id="appNameInput" type="text" class="input-minimal" placeholder="例: Claude Code" required>
+          </div>
+          <div class="form-field">
+            <label class="field-label" for="appCategoryInput">カテゴリ</label>
+            <input id="appCategoryInput" type="text" class="input-minimal" placeholder="例: AI CLI" value="AI CLI">
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label class="field-label" for="appCommandInput">コマンド <span class="required">*</span></label>
+          <input id="appCommandInput" type="text" class="input-minimal mono-input" placeholder="例: claude update" required>
+          <p class="field-hint">PowerShell 関数・.ps1・.exe・npm コマンドをそのまま記述できます。</p>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-field">
+            <label class="field-label" for="appShellSelect">実行シェル</label>
+            <select id="appShellSelect" class="select-minimal">
+              <option value="auto">自動（既定）</option>
+              <option value="pwsh">PowerShell 7 (pwsh)</option>
+              <option value="powershell">Windows PowerShell</option>
+              <option value="cmd">コマンドプロンプト (cmd)</option>
+            </select>
+          </div>
+          <div class="form-field form-field-bottom">
+            <label class="toggle-label" for="appEnabledInput">
+              <input id="appEnabledInput" type="checkbox" class="toggle-input" checked>
+              <span class="toggle-slider"></span>
+              <span>一括更新の対象に含める</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label class="field-label" for="appDescriptionInput">メモ（任意）</label>
+          <input id="appDescriptionInput" type="text" class="input-minimal" placeholder="用途などの簡単なメモ">
+        </div>
+
+        <div class="modal-footer">
+          <button id="cancelAppModalBtn" type="button" class="btn btn-ghost">キャンセル</button>
+          <button id="saveAppBtn" type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 設定・バックアップモーダル -->
+  <div id="settingsModal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="settingsModalTitle" class="modal-title">設定・バックアップ</h2>
+        <button id="closeSettingsModalBtn" type="button" class="icon-btn" aria-label="閉じる">✕</button>
+      </div>
+      <form id="settingsForm" class="modal-body">
+        <div class="form-grid">
+          <div class="form-field">
+            <label class="field-label" for="settingsMaxWorkers">最大並列数 (1〜12)</label>
+            <input id="settingsMaxWorkers" type="number" class="input-minimal" min="1" max="12" value="4" required>
+          </div>
+          <div class="form-field">
+            <label class="field-label" for="settingsTimeout">タイムアウト (秒)</label>
+            <input id="settingsTimeout" type="number" class="input-minimal" min="30" max="3600" value="300" required>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label class="field-label" for="settingsDefaultShell">既定シェル</label>
+          <select id="settingsDefaultShell" class="select-minimal">
+            <option value="auto">自動検出（pwsh 優先）</option>
+            <option value="pwsh">PowerShell 7 (pwsh)</option>
+            <option value="powershell">Windows PowerShell (5.1)</option>
+            <option value="cmd">コマンドプロンプト (cmd)</option>
+          </select>
+        </div>
+
+        <hr class="modal-divider">
+
+        <div class="form-field">
+          <span class="field-label">登録リストのバックアップ</span>
+          <div class="backup-actions">
+            <button id="exportJsonBtn" type="button" class="btn btn-secondary btn-sm">JSON エクスポート</button>
+            <button id="importJsonBtn" type="button" class="btn btn-ghost btn-sm">JSON インポート</button>
+            <input id="importFileInput" type="file" accept=".json,application/json" class="is-hidden">
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="cancelSettingsModalBtn" type="button" class="btn btn-ghost">閉じる</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 削除確認モーダル -->
+  <div id="confirmModal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="confirmModalTitle">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h2 id="confirmModalTitle" class="modal-title">登録を解除</h2>
+        <button id="closeConfirmModalBtn" type="button" class="icon-btn" aria-label="閉じる">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirmMessage" class="confirm-message"></p>
+        <p class="field-hint">リストから外すのみで、インストール済みのアプリ本体は削除されません。</p>
+        <div class="modal-footer">
+          <button id="cancelConfirmBtn" type="button" class="btn btn-ghost">キャンセル</button>
+          <button id="acceptConfirmBtn" type="button" class="btn btn-danger-subtle">解除する</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- トースト通知 -->
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
