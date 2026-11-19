@@ -32,3 +32,4 @@
 
 ## 2026-11-19 - Git リポジトリ初期化
 - `.gitignore` を追加し、`git init -b main` および初回コミットを実施。
+- `.gitignore` を Python / 仮想環境 / 機密情報 / アプリランタイムデータ / OS / IDE 向けの標準構成へ拡充。
