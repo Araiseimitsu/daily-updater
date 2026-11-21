@@ -12,6 +12,7 @@ import queue
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from backend.cleaner import PCCleaner
 from backend.events import EventBroker
 from backend.runner import UpdateRunner
 from backend.storage import AppStorage
@@ -21,7 +22,7 @@ logger = logging.getLogger("daily_updater.server")
 
 
 class UpdaterHTTPServer(ThreadingHTTPServer):
-    """依存オブジェクト（ストレージ・ランナー・イベントブローカー）を保持するサーバー。"""
+    """依存オブジェクト（ストレージ・ランナー・クリーナー・イベントブローカー）を保持するサーバー。"""
 
     daemon_threads = True
     allow_reuse_address = True
@@ -32,10 +33,16 @@ class UpdaterHTTPServer(ThreadingHTTPServer):
         storage: AppStorage,
         runner: UpdateRunner,
         broker: EventBroker,
+        cleaner: PCCleaner | None = None,
     ) -> None:
         self.storage = storage
         self.runner = runner
         self.broker = broker
+        self.cleaner = cleaner or PCCleaner(
+            storage=storage,
+            broker=broker,
+            log_callback=runner.append_external_log,
+        )
         super().__init__(server_address, UpdaterRequestHandler)
 
 
@@ -162,8 +169,13 @@ class UpdaterRequestHandler(BaseHTTPRequestHandler):
                     "settings": self.server.storage.get_settings(),
                     "templates": COMMAND_TEMPLATES,
                     "runtime": self.server.runner.get_runtime_snapshot(),
+                    "cleaner": self.server.cleaner.get_snapshot(),
                 }
             )
+            return
+
+        if path == "/api/cleaner":
+            self._send_json(self.server.cleaner.get_snapshot())
             return
 
         if path == "/api/apps":
@@ -256,8 +268,32 @@ class UpdaterRequestHandler(BaseHTTPRequestHandler):
                         raise ValueError("app_ids はリストである必要があります。")
                     app_ids = [str(x) for x in raw_ids]
 
-                result = self.server.runner.start_run(app_ids, max_workers=max_workers)
+                result = self.server.runner.start_run(
+                    app_ids,
+                    max_workers=max_workers,
+                    trigger_mode=mode,
+                )
                 self._send_json(result)
+                return
+
+            if path == "/api/cleaner/scan":
+                raw_ids = body.get("task_ids")
+                task_ids = [str(x) for x in raw_ids] if isinstance(raw_ids, list) else None
+                result = self.server.cleaner.start_scan(task_ids=task_ids)
+                self._send_json(result)
+                return
+
+            if path == "/api/cleaner/run":
+                mode = str(body.get("mode", "enabled"))
+                raw_ids = body.get("task_ids")
+                task_ids = [str(x) for x in raw_ids] if isinstance(raw_ids, list) else None
+                result = self.server.cleaner.start_clean(mode=mode, task_ids=task_ids)
+                self._send_json(result)
+                return
+
+            if path == "/api/cleaner/cancel":
+                cancelled = self.server.cleaner.cancel()
+                self._send_json({"cancelled": cancelled})
                 return
 
             if path == "/api/cancel":
@@ -299,7 +335,18 @@ class UpdaterRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/settings":
                 updated = self.server.storage.update_settings(body)
                 self.server.broker.publish("settings_changed", {"settings": updated})
+                self.server.broker.publish("cleaner_snapshot", self.server.cleaner.get_snapshot())
                 self._send_json({"settings": updated})
+                return
+
+            if path.startswith("/api/cleaner/tasks/"):
+                task_id = path[len("/api/cleaner/tasks/") :].strip("/")
+                if not task_id:
+                    raise ValueError("クリーニング項目IDが指定されていません。")
+                if "enabled" not in body:
+                    raise ValueError("enabled フィールドを指定してください。")
+                updated = self.server.cleaner.set_task_enabled(task_id, bool(body["enabled"]))
+                self._send_json({"task_id": task_id, "state": updated})
                 return
 
             if path.startswith("/api/apps/"):

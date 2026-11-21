@@ -89,6 +89,41 @@ export const api = {
     });
   },
 
+  getCleaner() {
+    return requestJson("/api/cleaner");
+  },
+
+  toggleCleanerTask(taskId, enabled) {
+    return requestJson(`/api/cleaner/tasks/${encodeURIComponent(taskId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
+  scanCleaner(taskIds = null) {
+    return requestJson("/api/cleaner/scan", {
+      method: "POST",
+      body: JSON.stringify(taskIds ? { task_ids: taskIds } : {}),
+    });
+  },
+
+  runCleaner({ mode = "enabled", taskIds = null } = {}) {
+    return requestJson("/api/cleaner/run", {
+      method: "POST",
+      body: JSON.stringify({
+        mode,
+        ...(taskIds ? { task_ids: taskIds } : {}),
+      }),
+    });
+  },
+
+  cancelCleaner() {
+    return requestJson("/api/cleaner/cancel", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  },
+
   /**
    * SSE ストリームへ接続する。
    */
@@ -111,6 +146,7 @@ export const api = {
       "apps_changed",
       "settings_changed",
       "logs_cleared",
+      "cleaner_snapshot",
     ];
 
     for (const eventName of eventNames) {

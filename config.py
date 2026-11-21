@@ -12,6 +12,7 @@ FRONTEND_DIR: Path = BASE_DIR / "frontend"
 
 APPS_FILE: Path = DATA_DIR / "apps.json"
 SETTINGS_FILE: Path = DATA_DIR / "settings.json"
+CLEANER_FILE: Path = DATA_DIR / "cleaner.json"
 
 DEFAULT_HOST: str = "127.0.0.1"
 DEFAULT_PORT: int = 8765
@@ -22,7 +23,101 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "max_workers": 4,
     "default_shell": "auto",
     "timeout_seconds": 300,
+    "cleaner_temp_min_age_hours": 24,
+    "clean_after_update_all": False,
 }
+
+# PCクリーニング標準タスク定義（すべて通常権限で安全に実行可能）
+DEFAULT_CLEANER_TASKS: list[dict[str, Any]] = [
+    {
+        "id": "user-temp",
+        "name": "ユーザー一時ファイル",
+        "category": "一時ファイル",
+        "target_display": "%TEMP%",
+        "description": "使用中（ロック中）のファイルや保護期間内の新しいファイルは自動でスキップします。",
+        "kind": "directory",
+        "safety": "safe",
+        "default_enabled": True,
+        "supports_age_filter": True,
+    },
+    {
+        "id": "crash-dumps",
+        "name": "クラッシュダンプ・エラー報告",
+        "category": "システム",
+        "target_display": "%LOCALAPPDATA%\\CrashDumps / WER",
+        "description": "アプリ異常終了時に残る診断ダンプと Windows エラー報告アーカイブを削除します。",
+        "kind": "directory",
+        "safety": "safe",
+        "default_enabled": True,
+        "supports_age_filter": False,
+    },
+    {
+        "id": "dns-flush",
+        "name": "DNS キャッシュのフラッシュ",
+        "category": "システム",
+        "target_display": "ipconfig /flushdns",
+        "description": "古い名前解決キャッシュをクリアして通信の詰まりを防ぎます（作業への支障なし）。",
+        "kind": "command",
+        "safety": "safe",
+        "default_enabled": True,
+        "supports_age_filter": False,
+    },
+    {
+        "id": "uv-cache-prune",
+        "name": "uv 未使用キャッシュ整理",
+        "category": "開発キャッシュ",
+        "target_display": "uv cache prune",
+        "description": "uv で参照されなくなったキャッシュのみを安全に整理します。",
+        "kind": "command",
+        "safety": "safe",
+        "default_enabled": True,
+        "supports_age_filter": False,
+    },
+    {
+        "id": "app-old-logs",
+        "name": "アプリの古いログ整理",
+        "category": "ログ",
+        "target_display": "logs\\ (7日以上前の古いログ)",
+        "description": "本アプリのローテート済み古いログを削除します（現行の updater.log は保持）。",
+        "kind": "directory",
+        "safety": "safe",
+        "default_enabled": True,
+        "supports_age_filter": False,
+    },
+    {
+        "id": "pip-cache",
+        "name": "pip ダウンロードキャッシュ",
+        "category": "開発キャッシュ",
+        "target_display": "%LOCALAPPDATA%\\pip\\Cache",
+        "description": "pip のパッケージキャッシュを削除します（次回インストール時に再取得されます）。",
+        "kind": "directory",
+        "safety": "optional",
+        "default_enabled": False,
+        "supports_age_filter": False,
+    },
+    {
+        "id": "npm-cache",
+        "name": "npm キャッシュ",
+        "category": "開発キャッシュ",
+        "target_display": "npm cache clean --force",
+        "description": "npm のダウンロードキャッシュを空にします（次回インストール時に再取得されます）。",
+        "kind": "command",
+        "safety": "optional",
+        "default_enabled": False,
+        "supports_age_filter": False,
+    },
+    {
+        "id": "recycle-bin",
+        "name": "ごみ箱を空にする",
+        "category": "ごみ箱",
+        "target_display": "Windows ごみ箱",
+        "description": "ごみ箱内のファイルを完全に削除します（復元不可・誤削除防止のため既定OFF）。",
+        "kind": "recycle_bin",
+        "safety": "caution",
+        "default_enabled": False,
+        "supports_age_filter": False,
+    },
+]
 
 # 初期登録アプリ（毎朝のアップデート対象としてプリセット）
 DEFAULT_APPS: list[dict[str, Any]] = [

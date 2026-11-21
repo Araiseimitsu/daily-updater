@@ -5,11 +5,14 @@
 const MAX_LOG_ITEMS = 1000;
 
 export const state = {
+  activeTab: "updates",
   apps: [],
   settings: {
     max_workers: 4,
     default_shell: "auto",
     timeout_seconds: 300,
+    cleaner_temp_min_age_hours: 24,
+    clean_after_update_all: false,
   },
   templates: [],
   shells: {
@@ -29,6 +32,21 @@ export const state = {
     running: 0,
     queued: 0,
   },
+  cleanerTasks: [],
+  cleanerState: {
+    active: false,
+    mode: null,
+    total: 0,
+    completed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    total_reclaimable_bytes: 0,
+    last_freed_bytes: 0,
+    last_scan_at: null,
+    last_clean_at: null,
+  },
+  cleanerAutoScanned: false,
   globalLogs: [],
   appLogs: {},
   selectedIds: new Set(),
@@ -40,7 +58,7 @@ export const state = {
 
 export function hydrateState(bootstrap) {
   state.apps = bootstrap.apps || [];
-  state.settings = bootstrap.settings || state.settings;
+  state.settings = { ...state.settings, ...(bootstrap.settings || {}) };
   state.templates = bootstrap.templates || [];
 
   const runtime = bootstrap.runtime || {};
@@ -50,7 +68,22 @@ export function hydrateState(bootstrap) {
   state.appLogs = runtime.app_logs || {};
   state.shells = runtime.shells || state.shells;
 
+  if (bootstrap.cleaner) {
+    setCleanerSnapshot(bootstrap.cleaner);
+  }
+
   pruneSelection();
+}
+
+export function setCleanerSnapshot(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+  state.cleanerTasks = snapshot.tasks || [];
+  state.cleanerState = { ...state.cleanerState, ...(snapshot.state || {}) };
+  if (state.cleanerState.last_scan_at) {
+    state.cleanerAutoScanned = true;
+  }
 }
 
 export function setApps(apps) {
@@ -65,7 +98,11 @@ export function pruneSelection() {
       state.selectedIds.delete(id);
     }
   }
-  if (state.focusedLogAppId && !validIds.has(state.focusedLogAppId)) {
+  if (
+    state.focusedLogAppId &&
+    !state.focusedLogAppId.startsWith("cleaner:") &&
+    !validIds.has(state.focusedLogAppId)
+  ) {
     state.focusedLogAppId = null;
   }
 }

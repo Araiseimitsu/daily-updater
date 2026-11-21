@@ -16,6 +16,14 @@
       <div class="brand-group">
         <img src="/assets/icon-64.png" alt="Daily CLI Updater" class="brand-icon-img">
         <h1 class="brand-title">Daily CLI Updater</h1>
+        <nav class="view-tabs" role="tablist" aria-label="機能切替">
+          <button id="tabUpdatesBtn" type="button" class="view-tab is-active" role="tab" aria-selected="true" data-tab="updates">
+            アップデート
+          </button>
+          <button id="tabCleanerBtn" type="button" class="view-tab" role="tab" aria-selected="false" data-tab="cleaner">
+            PCクリーニング <span id="tabCleanerBadge" class="count-tag is-hidden"></span>
+          </button>
+        </nav>
         <div id="connectionBadge" class="connection-badge is-connecting" title="サーバー接続状態">
           <span class="status-dot"></span>
           <span id="connectionText">接続中</span>
@@ -47,8 +55,8 @@
       </div>
     </header>
 
-    <!-- 統合コマンドバー -->
-    <section class="toolbar" aria-label="アップデート操作と絞り込み">
+    <!-- 統合コマンドバー（アップデート） -->
+    <section id="updaterToolbar" class="toolbar" aria-label="アップデート操作と絞り込み">
       <div class="toolbar-left">
         <button id="runAllBtn" type="button" class="btn btn-primary">
           すべて一括更新 <span id="enabledCountBadge" class="count-tag">0</span>
@@ -81,7 +89,36 @@
       </div>
     </section>
 
-    <!-- 極細進捗ストリップ -->
+    <!-- 統合コマンドバー（PCクリーニング） -->
+    <section id="cleanerToolbar" class="toolbar is-hidden" aria-label="PCクリーニング操作">
+      <div class="toolbar-left">
+        <button id="runCleanAllBtn" type="button" class="btn btn-primary">
+          クリーニング実行 <span id="cleanerEnabledCountBadge" class="count-tag">0</span>
+        </button>
+        <button id="scanCleanBtn" type="button" class="btn btn-secondary">
+          容量をスキャン
+        </button>
+        <button id="cancelCleanBtn" type="button" class="btn btn-danger-subtle is-hidden">
+          中止
+        </button>
+      </div>
+
+      <div class="toolbar-right">
+        <label class="inline-select-wrap" for="quickTempAgeSelect" title="%TEMP% 内の新しいファイルを保護する期間">
+          <span class="inline-label">%TEMP% 保護</span>
+          <select id="quickTempAgeSelect" class="select-minimal">
+            <option value="0">なし（使用中のみ保護）</option>
+            <option value="6">6時間以内を保護</option>
+            <option value="24" selected>24時間以内を保護</option>
+            <option value="72">3日以内を保護</option>
+          </select>
+        </label>
+        <div class="toolbar-divider" aria-hidden="true"></div>
+        <span id="cleanerSummaryBadge" class="summary-pill">未スキャン</span>
+      </div>
+    </section>
+
+    <!-- 極細進捗ストリップ（アップデート） -->
     <section id="progressSection" class="progress-strip is-hidden" aria-live="polite">
       <div class="progress-meta">
         <div class="progress-left">
@@ -100,9 +137,28 @@
       </div>
     </section>
 
+    <!-- 極細進捗ストリップ（PCクリーニング） -->
+    <section id="cleanerProgressSection" class="progress-strip is-hidden" aria-live="polite">
+      <div class="progress-meta">
+        <div class="progress-left">
+          <span id="cleanerProgressHeadline" class="progress-headline">クリーニング中</span>
+          <span id="cleanerProgressRatio" class="meta-mono">0 / 0</span>
+        </div>
+        <div class="progress-counters">
+          <span id="cleanerStatMetric" class="text-ok">解放: <strong>0 B</strong></span>
+          <span>完了 <strong id="cleanerStatSuccess">0</strong></span>
+          <span>スキップ <strong id="cleanerStatSkipped">0</strong></span>
+          <span class="text-err">失敗 <strong id="cleanerStatFailed">0</strong></span>
+        </div>
+      </div>
+      <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="cleanerProgressBarTrack">
+        <div id="cleanerProgressBarFill" class="progress-fill"></div>
+      </div>
+    </section>
+
     <!-- メインワークスペース（ミニマルリスト＋ライブログ） -->
     <main class="workspace-grid">
-      <section class="panel apps-panel" aria-label="登録済みアプリ一覧">
+      <section id="appsPanel" class="panel apps-panel" aria-label="登録済みアプリ一覧">
         <div class="panel-header">
           <span class="panel-title">登録アプリ</span>
           <span class="panel-hint">スイッチで一括対象を切替</span>
@@ -112,6 +168,14 @@
           <p class="empty-title">表示できるアプリがありません</p>
           <p class="empty-desc">右上の「+ 登録」からアップデートコマンドを追加してください。</p>
         </div>
+      </section>
+
+      <section id="cleanerPanel" class="panel cleaner-panel is-hidden" aria-label="PCクリーニング項目一覧">
+        <div class="panel-header">
+          <span class="panel-title">クリーニング項目</span>
+          <span class="panel-hint">使用中ファイルは自動スキップ · スイッチで一括対象を切替</span>
+        </div>
+        <div id="cleanerContainer" class="apps-list"></div>
       </section>
 
       <aside class="panel console-panel" aria-label="実行ログ">
@@ -226,6 +290,23 @@
             <option value="powershell">Windows PowerShell (5.1)</option>
             <option value="cmd">コマンドプロンプト (cmd)</option>
           </select>
+        </div>
+
+        <hr class="modal-divider">
+
+        <div class="form-grid">
+          <div class="form-field">
+            <label class="field-label" for="settingsTempMinAge">%TEMP% 保護期間 (時間)</label>
+            <input id="settingsTempMinAge" type="number" class="input-minimal" min="0" max="720" value="24" required>
+            <p class="field-hint">0 を指定すると保護期間なし（使用中のみスキップ）。</p>
+          </div>
+          <div class="form-field form-field-bottom">
+            <label class="toggle-label" for="settingsCleanAfterUpdate">
+              <input id="settingsCleanAfterUpdate" type="checkbox" class="toggle-input">
+              <span class="toggle-slider"></span>
+              <span>一括更新後に自動クリーニング</span>
+            </label>
+          </div>
         </div>
 
         <hr class="modal-divider">

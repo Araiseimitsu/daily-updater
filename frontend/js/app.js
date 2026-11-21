@@ -3,7 +3,15 @@
  */
 
 import { api } from "./api.js";
-import { clearStateLogs, getFilteredApps, hydrateState, pushLog, setApps, state } from "./state.js";
+import {
+  clearStateLogs,
+  getFilteredApps,
+  hydrateState,
+  pushLog,
+  setApps,
+  setCleanerSnapshot,
+  state,
+} from "./state.js";
 import {
   appendConsoleLog,
   closeAppModal,
@@ -12,9 +20,13 @@ import {
   openAppModal,
   openConfirmDeleteModal,
   openSettingsModal,
+  renderActiveTab,
   renderAll,
   renderAppsGrid,
   renderCategoryFilter,
+  renderCleanerControls,
+  renderCleanerList,
+  renderCleanerProgress,
   renderConsole,
   renderHeaderAndControls,
   renderProgressPanel,
@@ -203,16 +215,120 @@ async function handleSettingsSubmit(event) {
     max_workers: Number(document.getElementById("settingsMaxWorkers").value),
     timeout_seconds: Number(document.getElementById("settingsTimeout").value),
     default_shell: document.getElementById("settingsDefaultShell").value,
+    cleaner_temp_min_age_hours: Number(document.getElementById("settingsTempMinAge").value),
+    clean_after_update_all: document.getElementById("settingsCleanAfterUpdate").checked,
   };
 
   try {
     const res = await api.updateSettings(payload);
     state.settings = res.settings;
     renderHeaderAndControls();
+    renderCleanerControls();
+    renderCleanerList();
     closeSettingsModal();
     showToast("設定を保存しました", "success");
   } catch (err) {
     showToast(err.message, "error");
+  }
+}
+
+async function handleCleanerScan() {
+  try {
+    const res = await api.scanCleaner();
+    if (res.started) {
+      state.cleanerAutoScanned = true;
+      showToast("削除候補の容量スキャンを開始しました");
+    } else {
+      showToast(res.message || "スキャンを開始できませんでした。", "error");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function handleCleanerRun(mode = "enabled", taskIds = null) {
+  try {
+    const res = await api.runCleaner({ mode, taskIds });
+    if (res.started) {
+      const count = res.task_ids ? res.task_ids.length : 1;
+      showToast(`${count}項目のPCクリーニングを開始しました`, "success");
+    } else {
+      showToast(res.message || "クリーニングを開始できませんでした。", "error");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function handleCleanerCancel() {
+  try {
+    await api.cancelCleaner();
+    showToast("PCクリーニング処理を中止しています...");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function handleCleanerClick(event) {
+  const target = event.target.closest("[data-cleaner-action]");
+  if (!target) {
+    return;
+  }
+  const action = target.dataset.cleanerAction;
+  const taskId = target.dataset.taskId;
+  if (!taskId) {
+    return;
+  }
+
+  if (action === "run-cleaner-one") {
+    state.focusedLogAppId = `cleaner:${taskId}`;
+    renderConsole();
+    await handleCleanerRun("selected", [taskId]);
+    return;
+  }
+
+  if (action === "focus-cleaner-log") {
+    state.focusedLogAppId = `cleaner:${taskId}`;
+    renderConsole();
+  }
+}
+
+async function handleCleanerChange(event) {
+  const target = event.target;
+  const action = target.dataset?.cleanerAction;
+  const taskId = target.dataset?.taskId;
+  if (action !== "toggle-cleaner" || !taskId) {
+    return;
+  }
+  try {
+    await api.toggleCleanerTask(taskId, target.checked);
+    const task = state.cleanerTasks.find((item) => item.id === taskId);
+    if (task) {
+      task.enabled = target.checked;
+    }
+    renderCleanerControls();
+    renderCleanerList();
+    showToast(target.checked ? "一括クリーニング対象に含めました" : "一括クリーニング対象から除外しました");
+  } catch (err) {
+    target.checked = !target.checked;
+    showToast(err.message, "error");
+  }
+}
+
+function switchTab(nextTab) {
+  if (nextTab !== "updates" && nextTab !== "cleaner") {
+    return;
+  }
+  state.activeTab = nextTab;
+  renderActiveTab();
+  if (nextTab === "cleaner") {
+    renderCleanerControls();
+    renderCleanerList();
+    // 初回表示時に未スキャンであれば自動で容量スキャンを実行
+    if (!state.cleanerAutoScanned && !state.cleanerState.active) {
+      state.cleanerAutoScanned = true;
+      api.scanCleaner().catch(() => {});
+    }
   }
 }
 
@@ -292,6 +408,16 @@ function handleSseEvent(eventName, payload) {
   if (eventName === "settings_changed") {
     state.settings = payload.settings;
     renderHeaderAndControls();
+    renderCleanerControls();
+    renderCleanerList();
+    return;
+  }
+
+  if (eventName === "cleaner_snapshot") {
+    setCleanerSnapshot(payload);
+    renderCleanerControls();
+    renderCleanerProgress();
+    renderCleanerList();
     return;
   }
 
@@ -305,6 +431,38 @@ function bindStaticListeners() {
   document.getElementById("themeToggleBtn").addEventListener("click", toggleTheme);
   document.getElementById("openAddModalBtn").addEventListener("click", () => openAppModal(null));
   document.getElementById("openSettingsBtn").addEventListener("click", openSettingsModal);
+
+  // タブ切替（アップデート / PCクリーニング）
+  document.getElementById("tabUpdatesBtn").addEventListener("click", () => switchTab("updates"));
+  document.getElementById("tabCleanerBtn").addEventListener("click", () => switchTab("cleaner"));
+
+  // PCクリーニング操作
+  document.getElementById("runCleanAllBtn").addEventListener("click", () => {
+    state.focusedLogAppId = null;
+    renderConsole();
+    handleCleanerRun("enabled");
+  });
+  document.getElementById("scanCleanBtn").addEventListener("click", handleCleanerScan);
+  document.getElementById("cancelCleanBtn").addEventListener("click", handleCleanerCancel);
+  document.getElementById("quickTempAgeSelect").addEventListener("change", async (event) => {
+    const hours = Number(event.target.value);
+    try {
+      const res = await api.updateSettings({ cleaner_temp_min_age_hours: hours });
+      state.settings = res.settings;
+      renderCleanerControls();
+      renderCleanerList();
+      showToast(hours > 0 ? `%TEMP% 保護期間を ${hours}時間 に変更しました` : "%TEMP% 保護期間をなしに変更しました");
+      if (!state.cleanerState.active) {
+        api.scanCleaner(["user-temp"]).catch(() => {});
+      }
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  });
+
+  const cleanerContainer = document.getElementById("cleanerContainer");
+  cleanerContainer.addEventListener("click", handleCleanerClick);
+  cleanerContainer.addEventListener("change", handleCleanerChange);
 
   document.getElementById("runAllBtn").addEventListener("click", () => {
     state.focusedLogAppId = null;

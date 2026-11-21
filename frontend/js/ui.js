@@ -8,11 +8,32 @@ import { getEffectiveStatus, getFilteredApps, state } from "./state.js";
 const STATUS_LABELS = {
   idle: "",
   queued: "待機",
+  scanning: "スキャン中",
   running: "実行中",
   success: "完了",
   failed: "失敗",
   cancelled: "中止",
+  unavailable: "未導入",
 };
+
+const SAFETY_LABELS = {
+  safe: "毎日推奨",
+  optional: "任意",
+  caution: "注意",
+};
+
+export function formatBytes(numBytes) {
+  const bytes = Math.max(0, Number(numBytes) || 0);
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  for (let i = 0; i < units.length; i += 1) {
+    if (value < 1024 || i === units.length - 1) {
+      return i === 0 ? `${Math.round(value)} B` : `${value.toFixed(1)} ${units[i]}`;
+    }
+    value /= 1024;
+  }
+  return `${Math.round(bytes)} B`;
+}
 
 function formatDateTime(isoString) {
   if (!isoString) {
@@ -107,11 +128,31 @@ export function renderCategoryFilter() {
   }
 }
 
+export function renderActiveTab() {
+  const isCleaner = state.activeTab === "cleaner";
+  const tabUpdatesBtn = document.getElementById("tabUpdatesBtn");
+  const tabCleanerBtn = document.getElementById("tabCleanerBtn");
+
+  tabUpdatesBtn.classList.toggle("is-active", !isCleaner);
+  tabUpdatesBtn.setAttribute("aria-selected", String(!isCleaner));
+  tabCleanerBtn.classList.toggle("is-active", isCleaner);
+  tabCleanerBtn.setAttribute("aria-selected", String(isCleaner));
+
+  document.getElementById("updaterToolbar").classList.toggle("is-hidden", isCleaner);
+  document.getElementById("appsPanel").classList.toggle("is-hidden", isCleaner);
+  document.getElementById("cleanerToolbar").classList.toggle("is-hidden", !isCleaner);
+  document.getElementById("cleanerPanel").classList.toggle("is-hidden", !isCleaner);
+
+  // 進捗バーは現在アクティブなタブのものだけ表示
+  renderProgressPanel();
+  renderCleanerProgress();
+}
+
 export function renderProgressPanel() {
   const section = document.getElementById("progressSection");
   const batch = state.batch;
 
-  if (!batch || batch.total === 0) {
+  if (state.activeTab !== "updates" || !batch || batch.total === 0) {
     section.classList.add("is-hidden");
     return;
   }
@@ -260,6 +301,208 @@ function buildAppRow(app, index, totalVisible) {
   return row;
 }
 
+export function renderCleanerControls() {
+  const enabledCount = state.cleanerTasks.filter((task) => task.enabled && task.available).length;
+  const isBusy = Boolean(state.cleanerState.active);
+
+  document.getElementById("cleanerEnabledCountBadge").textContent = String(enabledCount);
+  document.getElementById("runCleanAllBtn").disabled = isBusy || enabledCount === 0;
+  document.getElementById("scanCleanBtn").disabled = isBusy;
+  document.getElementById("cancelCleanBtn").classList.toggle("is-hidden", !isBusy);
+
+  const tempAgeSelect = document.getElementById("quickTempAgeSelect");
+  const tempAgeVal = String(state.settings.cleaner_temp_min_age_hours ?? 24);
+  if (Array.from(tempAgeSelect.options).some((opt) => opt.value === tempAgeVal)) {
+    tempAgeSelect.value = tempAgeVal;
+  }
+
+  // タブ上の小さなバッジ（削除可能サイズ or 実行中）
+  const tabBadge = document.getElementById("tabCleanerBadge");
+  const reclaimable = state.cleanerState.total_reclaimable_bytes || 0;
+  if (isBusy) {
+    tabBadge.textContent = state.cleanerState.mode === "scan" ? "..." : "実行中";
+    tabBadge.classList.remove("is-hidden");
+  } else if (reclaimable > 0) {
+    tabBadge.textContent = formatBytes(reclaimable);
+    tabBadge.classList.remove("is-hidden");
+  } else {
+    tabBadge.classList.add("is-hidden");
+  }
+
+  // ツールバー右のサマリーピル
+  const summaryPill = document.getElementById("cleanerSummaryBadge");
+  summaryPill.classList.remove("has-reclaimable", "is-freed");
+  if (isBusy) {
+    summaryPill.textContent = state.cleanerState.mode === "scan" ? "スキャン中..." : "クリーニング中...";
+  } else if (state.cleanerState.last_clean_at && state.cleanerState.last_freed_bytes > 0) {
+    summaryPill.textContent = `直近解放: ${formatBytes(state.cleanerState.last_freed_bytes)} · 残候補: ${formatBytes(reclaimable)}`;
+    summaryPill.classList.add("is-freed");
+  } else if (state.cleanerState.last_scan_at) {
+    summaryPill.textContent = reclaimable > 0 ? `削除候補: ${formatBytes(reclaimable)}` : "クリーンな状態です";
+    if (reclaimable > 0) {
+      summaryPill.classList.add("has-reclaimable");
+    }
+  } else {
+    summaryPill.textContent = "未スキャン";
+  }
+}
+
+export function renderCleanerProgress() {
+  const section = document.getElementById("cleanerProgressSection");
+  const cs = state.cleanerState;
+
+  if (state.activeTab !== "cleaner" || !cs || (!cs.active && cs.total === 0)) {
+    section.classList.add("is-hidden");
+    return;
+  }
+
+  section.classList.remove("is-hidden");
+  const percent = cs.total > 0 ? Math.round((cs.completed / cs.total) * 100) : 0;
+
+  const headline = document.getElementById("cleanerProgressHeadline");
+  const metric = document.getElementById("cleanerStatMetric");
+  if (cs.active) {
+    headline.textContent = cs.mode === "scan" ? "容量スキャン実行中" : "PCクリーニング実行中";
+  } else if (cs.failed > 0) {
+    headline.textContent = `完了（${cs.failed}件エラー）`;
+  } else if (cs.last_clean_at && (!cs.last_scan_at || cs.last_clean_at >= cs.last_scan_at)) {
+    headline.textContent = "PCクリーニング完了";
+  } else {
+    headline.textContent = "容量スキャン完了";
+  }
+
+  if (cs.mode === "clean" || (cs.last_clean_at && (!cs.last_scan_at || cs.last_clean_at >= cs.last_scan_at))) {
+    metric.textContent = `解放: ${formatBytes(cs.last_freed_bytes || 0)}`;
+  } else {
+    metric.textContent = `削除候補: ${formatBytes(cs.total_reclaimable_bytes || 0)}`;
+  }
+
+  document.getElementById("cleanerProgressRatio").textContent = `${cs.completed}/${cs.total} (${percent}%)`;
+  document.getElementById("cleanerStatSuccess").textContent = String(cs.succeeded || 0);
+  document.getElementById("cleanerStatSkipped").textContent = String(cs.skipped || 0);
+  document.getElementById("cleanerStatFailed").textContent = String(cs.failed || 0);
+
+  document.getElementById("cleanerProgressBarTrack").setAttribute("aria-valuenow", String(percent));
+  document.getElementById("cleanerProgressBarFill").style.width = `${percent}%`;
+}
+
+function buildCleanerRow(task) {
+  const isBusy = Boolean(state.cleanerState.active);
+  const status = task.available ? task.status || "idle" : "unavailable";
+  const isDisabled = !task.enabled || !task.available;
+
+  const row = el("article", "app-row cleaner-row");
+  row.dataset.taskId = task.id;
+  if (isDisabled) {
+    row.classList.add("is-disabled");
+  }
+
+  // 左端: ステータスドット
+  const leading = el("div", "row-leading");
+  const dot = el("span", `state-dot is-${status}`);
+  dot.title = STATUS_LABELS[status] || "待機";
+  leading.appendChild(dot);
+
+  // 中央: 項目名・カテゴリ・安全度・対象・説明・最終結果
+  const main = el("div", "row-main");
+
+  const headline = el("div", "row-headline");
+  headline.appendChild(el("span", "row-name", task.name));
+  headline.appendChild(el("span", "row-category", task.category));
+
+  if (!task.available) {
+    headline.appendChild(el("span", "safety-badge is-unavailable", task.unavailable_reason || "未導入"));
+  } else if (SAFETY_LABELS[task.safety]) {
+    headline.appendChild(el("span", `safety-badge is-${task.safety}`, SAFETY_LABELS[task.safety]));
+  }
+
+  if (STATUS_LABELS[status] && status !== "unavailable") {
+    headline.appendChild(el("span", `row-status-text is-${status}`, STATUS_LABELS[status]));
+  }
+
+  let targetText = task.target_display || "";
+  if (task.id === "user-temp") {
+    const age = Number(task.min_age_hours ?? state.settings.cleaner_temp_min_age_hours ?? 24);
+    targetText += age > 0 ? `  (${age}時間以内は保護)` : "  (保護期間なし)";
+  }
+  const targetEl = el("div", "row-command", targetText);
+  targetEl.title = targetText;
+
+  const descEl = el("div", "row-desc", task.description || "");
+  descEl.title = task.description || "";
+
+  const submeta = el("div", "row-submeta");
+  const timeText =
+    typeof task.last_duration === "number"
+      ? `${formatDateTime(task.last_run_at)} · ${task.last_duration.toFixed(1)}s`
+      : formatDateTime(task.last_run_at);
+  submeta.appendChild(el("span", "meta-mono", timeText));
+
+  const summaryText = task.runtime_message || task.last_summary || "";
+  if (summaryText) {
+    const summaryEl = el("span", "row-summary", summaryText);
+    summaryEl.title = summaryText;
+    submeta.appendChild(summaryEl);
+  }
+
+  main.append(headline, targetEl, descEl, submeta);
+
+  // 右端: スキャン容量ピル + トグル + 個別実行 + ログ
+  const trailing = el("div", "row-trailing");
+
+  const sizePill = el("span", "size-pill");
+  if (!task.available) {
+    sizePill.textContent = "—";
+  } else if (task.id === "dns-flush") {
+    sizePill.textContent = "メモリ";
+  } else if (task.scan_bytes !== null && task.scan_bytes !== undefined) {
+    if (task.scan_bytes > 0 || (task.scan_count || 0) > 0) {
+      sizePill.textContent = `${formatBytes(task.scan_bytes)} · ${task.scan_count || 0}件`;
+      sizePill.classList.add("has-data");
+    } else {
+      sizePill.textContent = "空きなし";
+    }
+  } else {
+    sizePill.textContent = "未スキャン";
+  }
+
+  const toggleLabel = el("label", "toggle-label");
+  toggleLabel.title = task.enabled ? "一括クリーニング対象（クリックで除外）" : "一括対象から除外中（クリックで対象へ）";
+  const toggleInput = el("input", "toggle-input");
+  toggleInput.type = "checkbox";
+  toggleInput.checked = Boolean(task.enabled);
+  toggleInput.disabled = !task.available;
+  toggleInput.dataset.cleanerAction = "toggle-cleaner";
+  toggleInput.dataset.taskId = task.id;
+  const toggleSlider = el("span", "toggle-slider");
+  toggleLabel.append(toggleInput, toggleSlider);
+
+  const runBtn = el("button", "btn btn-xs btn-secondary", "実行");
+  runBtn.type = "button";
+  runBtn.disabled = isBusy || !task.available;
+  runBtn.dataset.cleanerAction = "run-cleaner-one";
+  runBtn.dataset.taskId = task.id;
+
+  const logBtn = el("button", "btn btn-xs btn-text", "ログ");
+  logBtn.type = "button";
+  logBtn.dataset.cleanerAction = "focus-cleaner-log";
+  logBtn.dataset.taskId = task.id;
+
+  trailing.append(sizePill, toggleLabel, runBtn, logBtn);
+  row.append(leading, main, trailing);
+  return row;
+}
+
+export function renderCleanerList() {
+  const container = document.getElementById("cleanerContainer");
+  container.replaceChildren();
+  const frag = document.createDocumentFragment();
+  for (const task of state.cleanerTasks) {
+    frag.appendChild(buildCleanerRow(task));
+  }
+  container.appendChild(frag);
+}
+
 export function renderAppsGrid() {
   const container = document.getElementById("appsContainer");
   const emptyState = document.getElementById("emptyState");
@@ -297,8 +540,14 @@ export function renderConsole() {
   let logs;
   let showAppName = true;
   if (focusedId) {
-    const app = state.apps.find((item) => item.id === focusedId);
-    scopeBadge.textContent = app ? app.name : "個別";
+    if (focusedId.startsWith("cleaner:")) {
+      const tid = focusedId.slice("cleaner:".length);
+      const task = state.cleanerTasks.find((item) => item.id === tid);
+      scopeBadge.textContent = task ? `掃除:${task.name}` : "掃除";
+    } else {
+      const app = state.apps.find((item) => item.id === focusedId);
+      scopeBadge.textContent = app ? app.name : "個別";
+    }
     logs = state.appLogs[focusedId] || [];
     showAppName = false;
   } else {
@@ -382,6 +631,8 @@ export function openSettingsModal() {
   document.getElementById("settingsMaxWorkers").value = String(state.settings.max_workers || 4);
   document.getElementById("settingsTimeout").value = String(state.settings.timeout_seconds || 300);
   document.getElementById("settingsDefaultShell").value = state.settings.default_shell || "auto";
+  document.getElementById("settingsTempMinAge").value = String(state.settings.cleaner_temp_min_age_hours ?? 24);
+  document.getElementById("settingsCleanAfterUpdate").checked = Boolean(state.settings.clean_after_update_all);
   document.getElementById("settingsModal").classList.remove("is-hidden");
 }
 
@@ -410,9 +661,13 @@ export function showToast(message, type = "info") {
 }
 
 export function renderAll() {
+  renderActiveTab();
   renderCategoryFilter();
   renderHeaderAndControls();
   renderProgressPanel();
   renderAppsGrid();
+  renderCleanerControls();
+  renderCleanerProgress();
+  renderCleanerList();
   renderConsole();
 }

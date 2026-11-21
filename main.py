@@ -14,6 +14,7 @@ import threading
 import time
 import webbrowser
 
+from backend.cleaner import PCCleaner
 from backend.events import EventBroker
 from backend.logger import setup_logger
 from backend.runner import UpdateRunner
@@ -80,7 +81,24 @@ def main() -> None:
     storage = AppStorage()
     broker = EventBroker()
     runner = UpdateRunner(storage=storage, broker=broker)
-    server = UpdaterHTTPServer((args.host, args.port), storage, runner, broker)
+    cleaner = PCCleaner(
+        storage=storage,
+        broker=broker,
+        log_callback=runner.append_external_log,
+    )
+
+    def _on_update_batch_finished(batch: dict[str, object]) -> None:
+        settings = storage.get_settings()
+        if (
+            settings.get("clean_after_update_all")
+            and batch.get("trigger_mode") == "all"
+            and int(batch.get("cancelled") or 0) == 0
+        ):
+            logger.info("一括アップデート完了後の自動クリーニングを開始します。")
+            cleaner.start_clean(mode="enabled")
+
+    runner.set_on_batch_finished(_on_update_batch_finished)
+    server = UpdaterHTTPServer((args.host, args.port), storage, runner, broker, cleaner=cleaner)
 
     logger.info("Daily CLI Updater を起動しました: %s", url)
     logger.info("終了するには Ctrl+C を押してください。")
@@ -97,6 +115,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("終了シグナルを受信しました。実行中の処理を停止します...")
         runner.cancel_all()
+        cleaner.cancel()
     finally:
         server.server_close()
         logger.info("サーバーを正常終了しました。")

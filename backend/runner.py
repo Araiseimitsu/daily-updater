@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 import logging
@@ -67,9 +68,15 @@ def _kill_process_tree(pid: int) -> None:
 class UpdateRunner:
     """複数アプリのアップデートを並列実行し、状態とログをリアルタイム配信する。"""
 
-    def __init__(self, storage: AppStorage, broker: EventBroker) -> None:
+    def __init__(
+        self,
+        storage: AppStorage,
+        broker: EventBroker,
+        on_batch_finished: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self._storage = storage
         self._broker = broker
+        self._on_batch_finished = on_batch_finished
         self._lock = threading.RLock()
 
         # 利用可能な実行シェルをキャッシュ検出
@@ -101,7 +108,23 @@ class UpdateRunner:
             "started_at": None,
             "finished_at": None,
             "target_ids": [],
+            "trigger_mode": None,
         }
+
+    def set_on_batch_finished(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
+        """バッチ完了時コールバックを設定する。"""
+        with self._lock:
+            self._on_batch_finished = callback
+
+    def append_external_log(
+        self,
+        source_id: str,
+        source_name: str,
+        line: str,
+        level: str = "output",
+    ) -> None:
+        """外部コンポーネント（PCクリーニング等）からのログを共通コンソールへ流す。"""
+        self._append_log(source_id, source_name, line, level=level)
 
     def get_available_shells(self) -> dict[str, Any]:
         """環境で利用可能なシェル情報を返す。"""
@@ -184,6 +207,7 @@ class UpdateRunner:
         self,
         app_ids: list[str],
         max_workers: int | None = None,
+        trigger_mode: str = "selected",
     ) -> dict[str, Any]:
         """指定されたアプリ群のアップデートをバックグラウンドで並列開始する。"""
         unique_ids: list[str] = []
@@ -248,11 +272,14 @@ class UpdateRunner:
                     "started_at": datetime.now().isoformat(timespec="seconds"),
                     "finished_at": None,
                     "target_ids": list(started_ids),
+                    "trigger_mode": trigger_mode,
                 }
             else:
                 self._batch_state["total"] += len(started_ids)
                 self._batch_state["queued"] += len(started_ids)
                 self._batch_state["target_ids"].extend(started_ids)
+                if trigger_mode == "all":
+                    self._batch_state["trigger_mode"] = "all"
 
             self._publish_batch_locked()
 
@@ -312,6 +339,8 @@ class UpdateRunner:
                 except Exception as exc:
                     logger.exception("ワーカースレッドで予期しないエラーが発生しました: %s", exc)
 
+        finished_snapshot: dict[str, Any] | None = None
+        callback: Callable[[dict[str, Any]], None] | None = None
         with self._lock:
             if not self._queued_or_running and self._batch_state["active"]:
                 self._batch_state["active"] = False
@@ -319,6 +348,14 @@ class UpdateRunner:
                 self._batch_state["queued"] = 0
                 self._batch_state["finished_at"] = datetime.now().isoformat(timespec="seconds")
                 self._publish_batch_locked()
+                finished_snapshot = dict(self._batch_state)
+                callback = self._on_batch_finished
+
+        if finished_snapshot is not None and callback is not None:
+            try:
+                callback(finished_snapshot)
+            except Exception as exc:
+                logger.exception("バッチ完了後フックの実行に失敗しました: %s", exc)
 
     def _run_single_app(self, app: dict[str, Any], timeout_seconds: int) -> None:
         """単一アプリのアップデートコマンドを実行し、出力を逐次配信する。"""
