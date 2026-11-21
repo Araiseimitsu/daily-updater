@@ -455,6 +455,8 @@ function buildCleanerRow(task) {
     sizePill.textContent = "—";
   } else if (task.id === "dns-flush") {
     sizePill.textContent = "メモリ";
+  } else if (task.id === "uv-cache-prune" && (task.scan_bytes === null || task.scan_bytes === undefined)) {
+    sizePill.textContent = "実行時に整理";
   } else if (task.scan_bytes !== null && task.scan_bytes !== undefined) {
     if (task.scan_bytes > 0 || (task.scan_count || 0) > 0) {
       sizePill.textContent = `${formatBytes(task.scan_bytes)} · ${task.scan_count || 0}件`;

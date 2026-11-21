@@ -12,6 +12,7 @@ from datetime import datetime
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,10 +28,82 @@ logger = logging.getLogger("daily_updater.cleaner")
 
 LogCallback = Callable[[str, str, str, str], None]
 
+# ANSI エスケープシーケンス除去
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))"
+)
+
+# `uv cache prune` の出力例: "Removed 1234 files (456.7MiB)"
+_UV_REMOVED_RE = re.compile(
+    r"Removed\s+([\d,]+)\s+files?\s*\(\s*([\d.]+)\s*([KMGT]?i?B)\s*\)",
+    re.IGNORECASE,
+)
+
 # Windows SHEmptyRecycleBinW フラグ
 _SHERB_NOCONFIRMATION = 0x00000001
 _SHERB_NOPROGRESSUI = 0x00000002
 _SHERB_NOSOUND = 0x00000004
+
+
+def _is_admin() -> bool:
+    """現在のプロセスが Windows 管理者権限で実行されているかを判定する。"""
+    if os.name != "nt":
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _kill_process_tree(pid: int) -> None:
+    """子プロセスを含めてプロセスツリー全体を停止する。"""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return
+        except Exception as exc:
+            logger.debug("taskkill 呼び出しに失敗しました (PID=%d): %s", pid, exc)
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
+def _decode_and_clean_line(raw: bytes) -> str:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp932", errors="replace")
+    return _ANSI_ESCAPE_RE.sub("", text).rstrip("\r\n")
+
+
+def _parse_uv_prune_output(text: str) -> tuple[int, int]:
+    """`uv cache prune` の出力から (解放バイト数, 削除ファイル数) を抽出する。"""
+    match = _UV_REMOVED_RE.search(text or "")
+    if not match:
+        return 0, 0
+    file_count = int(match.group(1).replace(",", ""))
+    value = float(match.group(2))
+    unit = match.group(3).lower()
+    multipliers = {
+        "b": 1,
+        "kb": 1000,
+        "kib": 1024,
+        "mb": 1000**2,
+        "mib": 1024**2,
+        "gb": 1000**3,
+        "gib": 1024**3,
+        "tb": 1000**4,
+        "tib": 1024**4,
+    }
+    freed_bytes = int(value * multipliers.get(unit, 1))
+    return max(0, freed_bytes), max(0, file_count)
 
 
 class _SHQUERYRBINFO(ctypes.Structure):
@@ -437,9 +510,11 @@ class PCCleaner:
     def _is_task_available(self, task_id: str) -> tuple[bool, str]:
         """タスクが現在の環境で実行可能かを確認する。"""
         if task_id == "dns-flush":
-            if os.name == "nt" and shutil.which("ipconfig"):
-                return True, ""
-            return False, "ipconfig が見つかりません"
+            if os.name != "nt" or not shutil.which("ipconfig"):
+                return False, "ipconfig が見つかりません"
+            if not _is_admin():
+                return False, "管理者権限が必要"
+            return True, ""
         if task_id == "uv-cache-prune":
             if shutil.which("uv"):
                 return True, ""
@@ -539,10 +614,7 @@ class PCCleaner:
             self._cancel_event.set()
             proc = self._active_proc
         if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
+            _kill_process_tree(proc.pid)
         return True
 
     def start_scan(self, task_ids: list[str] | None = None) -> dict[str, Any]:
@@ -598,6 +670,7 @@ class PCCleaner:
                     d
                     for d in DEFAULT_CLEANER_TASKS
                     if persisted.get(d["id"], {}).get("enabled", d["default_enabled"])
+                    and self._is_task_available(d["id"])[0]
                 ]
 
             if not selected_defs:
@@ -669,8 +742,8 @@ class PCCleaner:
                 self._task_runtime[tid]["message"] = "容量を計測中..."
             self._publish_snapshot()
 
-            scan_bytes = 0
-            scan_count = 0
+            scan_bytes: int | None = 0
+            scan_count: int | None = 0
             skipped_recent = 0
 
             try:
@@ -678,6 +751,10 @@ class PCCleaner:
                     scan_bytes, scan_count = _query_recycle_bin()
                 elif tid == "dns-flush":
                     scan_bytes, scan_count = 0, 0
+                elif tid == "uv-cache-prune":
+                    # uv キャッシュは数十万ファイル規模になりやすく未使用分のみ整理されるため、
+                    # Python 側の全件走査を行わず実行時に uv 本体の結果を集計する。
+                    scan_bytes, scan_count = None, None
                 else:
                     paths = self._resolve_task_paths(tid)
                     min_age = 0.0
@@ -697,8 +774,10 @@ class PCCleaner:
                     scan_count = res["file_count"]
                     skipped_recent = res["skipped_recent"]
 
-                total_bytes += scan_bytes
-                total_files += scan_count
+                if isinstance(scan_bytes, int):
+                    total_bytes += scan_bytes
+                if isinstance(scan_count, int):
+                    total_files += scan_count
 
                 with self._lock:
                     self._task_runtime[tid] = {
@@ -739,8 +818,14 @@ class PCCleaner:
                 "info",
             )
 
-    def _run_command_task(self, cmd: list[str], timeout: int = 180) -> tuple[int, str]:
-        """外部クリーニングコマンドをサブプロセス実行して出力と終了コードを返す。"""
+    def _run_command_task(
+        self,
+        cmd: list[str],
+        task_id: str,
+        task_name: str,
+        timeout: int = 180,
+    ) -> tuple[int, str]:
+        """外部クリーニングコマンドをサブプロセス実行し、出力をリアルタイム配信する。"""
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
@@ -749,22 +834,72 @@ class PCCleaner:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=env,
+            bufsize=0,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         with self._lock:
             self._active_proc = proc
+
+        timed_out = threading.Event()
+
+        def _on_timeout() -> None:
+            timed_out.set()
+            if proc.poll() is None:
+                self._emit_log(
+                    task_id,
+                    task_name,
+                    f"タイムアウト ({timeout}秒) に達したためプロセスを停止します。",
+                    "error",
+                )
+                _kill_process_tree(proc.pid)
+
+        timer = threading.Timer(timeout, _on_timeout)
+        timer.daemon = True
+        timer.start()
+
+        lines: list[str] = []
         try:
-            raw_out, _ = proc.communicate(timeout=timeout)
-            try:
-                text = raw_out.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw_out.decode("cp932", errors="replace")
-            return proc.returncode, text.strip()
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return 124, f"タイムアウト ({timeout}秒) に達しました。"
+            if proc.stdout is not None:
+                buf = bytearray()
+                while True:
+                    chunk = proc.stdout.read(256)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    while True:
+                        nl_idx = buf.find(b"\n")
+                        cr_idx = buf.find(b"\r")
+                        if nl_idx == -1 and cr_idx == -1:
+                            break
+                        split_idx = nl_idx if (nl_idx != -1 and (cr_idx == -1 or nl_idx < cr_idx)) else cr_idx
+                        raw_line = bytes(buf[:split_idx])
+                        advance = split_idx + 1
+                        if split_idx == cr_idx and advance < len(buf) and buf[advance] == 10:
+                            advance += 1
+                        del buf[:advance]
+
+                        cleaned = _decode_and_clean_line(raw_line).strip()
+                        if cleaned:
+                            lines.append(cleaned)
+                            self._emit_log(task_id, task_name, cleaned, "output")
+
+                if buf:
+                    cleaned = _decode_and_clean_line(bytes(buf)).strip()
+                    if cleaned:
+                        lines.append(cleaned)
+                        self._emit_log(task_id, task_name, cleaned, "output")
+
+            rc = proc.wait()
+            if timed_out.is_set():
+                return 124, "\n".join(lines) or f"タイムアウト ({timeout}秒) に達しました。"
+            return rc, "\n".join(lines)
         finally:
+            timer.cancel()
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
             with self._lock:
                 if self._active_proc is proc:
                     self._active_proc = None
@@ -861,11 +996,7 @@ class PCCleaner:
 
                 elif tid == "dns-flush":
                     self._emit_log(tid, name, "$ ipconfig /flushdns", "info")
-                    rc, out = self._run_command_task(["ipconfig", "/flushdns"], timeout=30)
-                    if out:
-                        for line in out.splitlines():
-                            if line.strip():
-                                self._emit_log(tid, name, line.strip(), "output")
+                    rc, _ = self._run_command_task(["ipconfig", "/flushdns"], tid, name, timeout=30)
                     if rc == 0:
                         summary = "DNS リゾルバーキャッシュをフラッシュしました"
                     else:
@@ -873,41 +1004,43 @@ class PCCleaner:
                         summary = f"DNS フラッシュ失敗 (終了コード: {rc})"
 
                 elif tid == "uv-cache-prune":
-                    paths = self._resolve_task_paths(tid)
-                    before = _scan_directory_tree(paths, cancel_event=self._cancel_event)
-                    self._emit_log(tid, name, "$ uv cache prune", "info")
-                    rc, out = self._run_command_task(["uv", "cache", "prune"], timeout=180)
-                    if out:
-                        for line in out.splitlines():
-                            if line.strip():
-                                self._emit_log(tid, name, line.strip(), "output")
-                    after = _scan_directory_tree(paths, cancel_event=self._cancel_event)
-                    freed_bytes = max(0, before["reclaimable_bytes"] - after["reclaimable_bytes"])
-                    deleted_count = max(0, before["file_count"] - after["file_count"])
+                    uv_timeout = max(900, int(settings.get("timeout_seconds", 300)))
+                    self._emit_log(tid, name, "$ uv cache prune --no-progress", "info")
+                    rc, out = self._run_command_task(
+                        ["uv", "cache", "prune", "--no-progress"],
+                        tid,
+                        name,
+                        timeout=uv_timeout,
+                    )
                     if rc == 0:
-                        summary = (
-                            f"{format_bytes(freed_bytes)} 解放"
-                            if freed_bytes > 0
-                            else "未使用キャッシュはありませんでした"
-                        )
+                        freed_bytes, deleted_count = _parse_uv_prune_output(out)
+                        if freed_bytes > 0 or deleted_count > 0:
+                            summary = f"{format_bytes(freed_bytes)} 解放 ({deleted_count}件削除)"
+                        else:
+                            summary = "未使用キャッシュはありませんでした"
                     else:
                         status = "failed"
-                        summary = f"uv cache prune 失敗 (終了コード: {rc})"
+                        summary = (
+                            f"タイムアウト ({uv_timeout}秒)"
+                            if rc == 124
+                            else f"uv cache prune 失敗 (終了コード: {rc})"
+                        )
 
                 elif tid == "npm-cache":
                     paths = self._resolve_task_paths(tid)
                     before = _scan_directory_tree(paths, cancel_event=self._cancel_event)
                     npm_exe = shutil.which("npm") or "npm"
                     self._emit_log(tid, name, "$ npm cache clean --force", "info")
-                    rc, out = self._run_command_task([npm_exe, "cache", "clean", "--force"], timeout=180)
-                    if out:
-                        for line in out.splitlines():
-                            if line.strip():
-                                self._emit_log(tid, name, line.strip(), "output")
-                    after = _scan_directory_tree(paths, cancel_event=self._cancel_event)
-                    freed_bytes = max(0, before["reclaimable_bytes"] - after["reclaimable_bytes"])
-                    deleted_count = max(0, before["file_count"] - after["file_count"])
+                    rc, _ = self._run_command_task(
+                        [npm_exe, "cache", "clean", "--force"],
+                        tid,
+                        name,
+                        timeout=300,
+                    )
                     if rc == 0:
+                        after = _scan_directory_tree(paths, cancel_event=self._cancel_event)
+                        freed_bytes = max(0, before["reclaimable_bytes"] - after["reclaimable_bytes"])
+                        deleted_count = max(0, before["file_count"] - after["file_count"])
                         summary = (
                             f"{format_bytes(freed_bytes)} 解放"
                             if freed_bytes > 0
@@ -963,10 +1096,10 @@ class PCCleaner:
                 summary=summary,
             )
 
-            # クリーニング後の残量を最新化
-            remaining_bytes = 0
-            remaining_count = 0
-            if status == "success" and tid not in ("dns-flush", "recycle-bin"):
+            # クリーニング後の残量を最新化（大規模な uv キャッシュは走査しない）
+            remaining_bytes: int | None = None
+            remaining_count: int | None = None
+            if status == "success" and tid not in ("dns-flush", "recycle-bin", "uv-cache-prune"):
                 paths = self._resolve_task_paths(tid)
                 min_age = temp_age if tid == "user-temp" else (24.0 * 7.0 if tid == "app-old-logs" else 0.0)
                 file_filter = _old_log_filter if tid == "app-old-logs" else None
@@ -975,6 +1108,8 @@ class PCCleaner:
                 remaining_count = after_scan["file_count"]
             elif status == "success" and tid == "recycle-bin":
                 remaining_bytes, remaining_count = _query_recycle_bin()
+            elif status == "success" and tid == "dns-flush":
+                remaining_bytes, remaining_count = 0, 0
 
             with self._lock:
                 self._task_runtime[tid] = {

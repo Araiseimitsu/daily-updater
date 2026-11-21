@@ -12,7 +12,13 @@ import unittest
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 
-from backend.cleaner import PCCleaner, _clean_directory_tree, _is_safe_cleanup_root, _scan_directory_tree
+from backend.cleaner import (
+    PCCleaner,
+    _clean_directory_tree,
+    _is_safe_cleanup_root,
+    _parse_uv_prune_output,
+    _scan_directory_tree,
+)
 from backend.events import EventBroker
 from backend.runner import UpdateRunner
 from backend.server import UpdaterHTTPServer
@@ -305,6 +311,25 @@ class TestDailyUpdater(unittest.TestCase):
             cleaner.cancel()
             server.shutdown()
             server.server_close()
+
+    def test_uv_prune_output_parser_and_dns_admin_guard(self) -> None:
+        """uv cache prune 出力パーサと、非管理者時の DNS フラッシュ除外を確認する。"""
+        freed, files = _parse_uv_prune_output("Pruning cache at: C:\\uv\\cache\nRemoved 1,234 files (256.5MiB)")
+        self.assertEqual(files, 1234)
+        self.assertEqual(freed, int(256.5 * 1024 * 1024))
+
+        freed_gb, files_gb = _parse_uv_prune_output("Removed 10 files (1.5GiB)")
+        self.assertEqual(files_gb, 10)
+        self.assertEqual(freed_gb, int(1.5 * (1024**3)))
+
+        self.assertEqual(_parse_uv_prune_output("No unused entries found"), (0, 0))
+
+        cleaner = PCCleaner(storage=self.storage, broker=self.broker)
+        with patch("backend.cleaner._is_admin", return_value=False):
+            snap = cleaner.get_snapshot()
+            dns_task = next(t for t in snap["tasks"] if t["id"] == "dns-flush")
+            self.assertFalse(dns_task["available"])
+            self.assertIn("管理者権限", dns_task["unavailable_reason"])
 
 
 if __name__ == "__main__":
